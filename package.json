@@ -1,0 +1,14 @@
+{
+  "name": "moray-buckets",
+  "version": "1.0.0",
+  "description": "Library to perform common moray buckets initialization and migration operations using best practices.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "moray"
+  ],
+  "author": "Julien Gilli",
+  "license": "ISC"
+}
