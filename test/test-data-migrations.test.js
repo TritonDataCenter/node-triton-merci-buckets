@@ -16,9 +16,6 @@ var util = require('util');
 var vasync = require('vasync');
 var verror = require('verror');
 
-var DataMigrationsController =
-    require('../lib/data-migrations/controller').DataMigrationsController;
-var dataMigrationsLoader = require('../lib/data-migrations/loader');
 var MorayBucketsInitializer = require('../index').MorayBucketsInitializer;
 
 var testMoray = require('./lib/moray');
@@ -81,25 +78,40 @@ function findAllObjects(morayClient, bucketName, filter, callback) {
 }
 
 test('data migrations with invalid filenames', function (t) {
-    var dataMigrationsLoaderLogger = bunyan.createLogger({
-        name: 'data-migrations-loader',
-        level: 'debug'
+    var morayBucketsInitializer;
+    var morayClient = testMoray.creatTestMorayClient({
+        log: TEST_LOGGER
     });
 
-    dataMigrationsLoader.loadMigrations({
-        log: dataMigrationsLoaderLogger,
-        migrationsRootPath: path.resolve(__dirname, 'fixtures',
-            'test-data-migrations', 'data-migrations-invalid-filenames')
-    }, function onMigrationsLoaded(loadMigrationsErr/* , migrations */) {
+    morayBucketsInitializer  = new MorayBucketsInitializer({
+        bucketsConfig: TEST_BUCKETS_CONFIG,
+        dataMigrationsPath: path.resolve(__dirname, 'fixtures',
+            'test-data-migrations', 'data-migrations-invalid-filenames'),
+        log: TEST_LOGGER,
+        morayClient: morayClient
+    });
+
+    morayBucketsInitializer.start();
+
+    morayBucketsInitializer.once('error', function onInitError(initErr) {
         var expectedErrorName = 'InvalidDataMigrationFileNamesError';
 
-        t.ok(loadMigrationsErr,
+        t.ok(initErr,
             'loading migrations with invalid filenames should error');
-
-        if (loadMigrationsErr) {
-            t.ok(verror.hasCauseWithName(loadMigrationsErr, expectedErrorName),
+        if (initErr) {
+            t.ok(verror.hasCauseWithName(initErr, expectedErrorName),
                 'error should have a cause of ' + expectedErrorName);
         }
+
+        morayClient.close();
+
+        t.end();
+    });
+
+    morayBucketsInitializer.once('done', function onInitDone() {
+        t.ok(false, 'buckets init should not be successful');
+
+        morayClient.close();
 
         t.end();
     });
@@ -109,6 +121,224 @@ test('data migrations with transient error', function (t) {
     var context = {};
     var morayBucketsInitializer;
     var TRANSIENT_ERROR_MSG = 'Mocked transient error';
+
+    vasync.pipeline({arg: context, funcs: [
+        function connectToMoray(ctx, next) {
+            ctx.morayClient = testMoray.creatTestMorayClient({
+                log: TEST_LOGGER
+            });
+
+            ctx.morayClient.once('connect', next);
+            ctx.morayClient.once('error', next);
+        },
+        function cleanup(ctx, next) {
+            ctx.morayClient.delBucket(TEST_BUCKET_NAME,
+                function onDel(delBucketErr) {
+                    if (delBucketErr &&
+                        verror.hasCauseWithName(delBucketErr,
+                            'BucketNotFoundError')) {
+                        next();
+                    } else {
+                        next(delBucketErr);
+                    }
+                });
+        },
+        function setupMorayBuckets(ctx, next) {
+            morayBucketsInitializer = new MorayBucketsInitializer({
+                bucketsConfig: TEST_BUCKETS_CONFIG,
+                log: TEST_LOGGER,
+                morayClient: ctx.morayClient
+            });
+
+            morayBucketsInitializer.start();
+
+            morayBucketsInitializer.once('done', next);
+            morayBucketsInitializer.once('error', next);
+        },
+        function checkMorayBucketsInitStatus(_, next) {
+            var bucketsReindexStatus =
+                morayBucketsInitializer.status().bucketsReindex;
+            var bucketsSetupStatus =
+                morayBucketsInitializer.status().bucketsSetup;
+            var expectedBucketsReindexState = 'DONE';
+            var expectedBucketsSetupState = 'DONE';
+
+            t.ifError(bucketsReindexStatus.latestError,
+                'buckets reindex status should not have latest error present');
+            t.equal(bucketsReindexStatus.state, expectedBucketsReindexState,
+                'buckets reindex state should be ' +
+                    expectedBucketsReindexState + ' got: ' +
+                    bucketsReindexStatus.state);
+
+            t.ifError(bucketsSetupStatus.latestError,
+                'buckets setup status should not have latest error present');
+            t.equal(bucketsSetupStatus.state, expectedBucketsSetupState,
+                'buckets setup state should be ' +
+                    expectedBucketsSetupState + ' got: ' +
+                    bucketsSetupStatus.state);
+
+            next();
+        },
+        function writeTestObjects(ctx, next) {
+            assert.object(ctx.morayClient, 'ctx.morayClient');
+
+            testMoray.writeObjects(ctx.morayClient, TEST_BUCKET_NAME, {
+                foo: 'foo'
+            }, NUM_TEST_OBJECTS, function onTestObjectsWritten(writeErr) {
+                t.ok(!writeErr, 'writing test objects should not error, got: ' +
+                    util.inspect(writeErr));
+                next(writeErr);
+            });
+        },
+        function injectTransientError(ctx, next) {
+            ctx.originalBatch = ctx.morayClient.batch;
+            ctx.morayClient.batch =
+                function mockedBatch(opsList, callback) {
+                    assert.arrayOfObject(opsList, 'opsList');
+                    assert.func(callback, 'callback');
+
+                    callback(new Error(TRANSIENT_ERROR_MSG));
+                };
+            next();
+        },
+        function startMigrations(ctx, next) {
+            morayBucketsInitializer = new MorayBucketsInitializer({
+                bucketsConfig: TEST_BUCKETS_CONFIG,
+                log: TEST_LOGGER,
+                morayClient: ctx.morayClient,
+                dataMigrationsPath: path.join(__dirname, 'fixtures',
+                    'test-data-migrations', 'data-migrations-valid')
+            });
+
+            morayBucketsInitializer.start();
+
+            morayBucketsInitializer.once('done', function onBucketsInitDone() {
+                t.fail('moray buckets init should not complete while ' +
+                    'transient error injected');
+            });
+
+            morayBucketsInitializer.once('error',
+                function onBucketsInitError(bucketsInitErr) {
+                    t.fail('moray buckets init should not error while ' +
+                        'transient error injected, got: ' + bucketsInitErr);
+                });
+
+            next();
+        },
+        function checkDataMigrationsTransientError(_, next) {
+            var MAX_NUM_TRIES = 20;
+            var NUM_TRIES = 0;
+            var RETRY_DELAY_IN_MS = 1000;
+
+            function doCheckMigrationsStatus() {
+                var latestMigrationsErrs =
+                    morayBucketsInitializer.status().dataMigrations.latestErrors;
+                var foundExpectedErrMsg;
+
+                ++NUM_TRIES;
+
+                if (latestMigrationsErrs) {
+                    foundExpectedErrMsg =
+                        latestMigrationsErrs[TEST_MODEL_NAME].message.indexOf(TRANSIENT_ERROR_MSG) !== -1;
+
+                    t.ok(foundExpectedErrMsg,
+                            'data migrations latest error should include ' +
+                                TRANSIENT_ERROR_MSG + ', got: ' +
+                                latestMigrationsErrs[TEST_MODEL_NAME].message);
+                        next();
+                } else {
+                    if (NUM_TRIES >= MAX_NUM_TRIES) {
+                        t.ok(false, 'max number of tries exceeded');
+                        next();
+                    } else {
+                        setTimeout(doCheckMigrationsStatus,
+                            RETRY_DELAY_IN_MS);
+                    }
+                }
+            }
+
+            doCheckMigrationsStatus();
+        },
+        function removeTransientError(ctx, next) {
+            morayBucketsInitializer.removeAllListeners('done');
+            morayBucketsInitializer.removeAllListeners('error');
+
+            ctx.morayClient.batch = ctx.originalBatch;
+
+            morayBucketsInitializer.once('done',
+                function onMorayBucketsInitDone() {
+                    t.ok(true,
+                        'moray buckets init should eventually complete ' +
+                            'successfully');
+                    next();
+                });
+
+            morayBucketsInitializer.once('error',
+                function onMorayBucketsInitError(bucketsInitErr) {
+                    t.ok(false, 'moray buckets init should not error, got: ' +
+                        util.inspect(bucketsInitErr));
+                    next(bucketsInitErr);
+                });
+        },
+        function readTestObjects(ctx, next) {
+            assert.object(ctx.morayClient, 'ctx.morayClient');
+
+            findAllObjects(ctx.morayClient, TEST_BUCKET_NAME, '(foo=*)',
+                function onFindAllObjects(findErr, objects) {
+                    var nonMigratedObjects;
+
+                    t.ok(!findErr,
+                        'reading all objects back should not error, got: ' +
+                            util.inspect(findErr));
+                    t.ok(objects,
+                        'reading all objects should not return empty response');
+
+                    if (objects) {
+                        nonMigratedObjects =
+                            objects.filter(function checkObjects(object) {
+                                return object.value.bar !== 'foo';
+                            });
+                        t.equal(nonMigratedObjects.length, 0,
+                            'data migrations should have migrated all objects' +
+                                ', got the following non-migrated objects: ' +
+                                nonMigratedObjects.join(', '));
+                    }
+
+                    next(findErr);
+                });
+        },
+        function checkDataMigrationsDone(_, next) {
+            var dataMigrationsStatus =
+                morayBucketsInitializer.status().dataMigrations;
+            var latestExpectedCompletedVmsMigration = 1;
+            var latestCompletedMigrations;
+
+            if (dataMigrationsStatus && dataMigrationsStatus.completed) {
+                latestCompletedMigrations =
+                    dataMigrationsStatus.completed[TEST_MODEL_NAME];
+            }
+
+            t.equal(latestExpectedCompletedVmsMigration,
+                latestCompletedMigrations,
+                'latest completed data migration for vms model should be ' +
+                    'at version ' + latestExpectedCompletedVmsMigration);
+
+            next();
+        }
+    ]}, function allMigrationsDone(allMigrationsErr) {
+        t.ok(!allMigrationsErr, 'data migrations test should not error');
+
+        if (context.morayClient) {
+            context.morayClient.close();
+        }
+
+        t.end();
+    });
+});
+
+test('data migrations with non-transient error', function (t) {
+    var context = {};
+    var morayBucketsInitializer;
 
     vasync.pipeline({arg: context, funcs: [
         function connectToMoray(ctx, next) {
@@ -154,161 +384,44 @@ test('data migrations with transient error', function (t) {
                 next(writeErr);
             });
         },
-        function loadDataMigrations(ctx, next) {
-            var dataMigrationsLoaderLogger = bunyan.createLogger({
-                name: 'data-migrations-loader',
-                level: 'info'
-            });
-
-            dataMigrationsLoader.loadMigrations({
-                log: dataMigrationsLoaderLogger,
-                migrationsRootPath: path.resolve(__dirname, 'fixtures',
-                    'test-data-migrations', 'data-migrations-valid')
-            }, function onMigrationsLoaded(loadMigrationsErr, migrations) {
-                ctx.migrations = migrations;
-                next(loadMigrationsErr);
-            });
-        },
-        function createMigrationsController(ctx, next) {
-            assert.object(ctx.migrations, 'ctx.migrations');
-            assert.object(ctx.morayClient, 'ctx.morayClient');
-
-            ctx.dataMigrationsCtrl = new DataMigrationsController({
-                bucketsConfig: TEST_BUCKETS_CONFIG,
-                log: bunyan.createLogger({
-                    name: 'data-migratons-controller',
-                    level: 'info'
-                }),
-                migrations: ctx.migrations,
-                morayClient: ctx.morayClient
-            });
-
-            next();
-        },
-        function injectTransientError(ctx, next) {
+        function injectNonTransientError(ctx, next) {
             ctx.originalBatch = ctx.morayClient.batch;
             ctx.morayClient.batch =
                 function mockedBatch(opsList, callback) {
                     assert.arrayOfObject(opsList, 'opsList');
                     assert.func(callback, 'callback');
 
-                    callback(new Error(TRANSIENT_ERROR_MSG));
+                    callback(new verror.VError({
+                        name: 'BucketNotFoundError'
+                    }, 'non-transient error'));
                 };
             next();
         },
         function startMigrations(ctx, next) {
-            ctx.dataMigrationsCtrl.runMigrations();
+            morayBucketsInitializer = new MorayBucketsInitializer({
+                bucketsConfig: TEST_BUCKETS_CONFIG,
+                log: TEST_LOGGER,
+                morayClient: ctx.morayClient,
+                dataMigrationsPath: path.join(__dirname, 'fixtures',
+                    'test-data-migrations', 'data-migrations-valid')
+            });
 
-            ctx.dataMigrationsCtrl.once('done',
-                function onDataMigrationsDone() {
-                    t.ok(false, 'data migrations should not complete when ' +
-                        'transient error injected');
-                });
+            morayBucketsInitializer.start();
 
-            ctx.dataMigrationsCtrl.once('error',
-                function onDataMigrationsError(/* dataMigrationsErr */) {
-                    t.ok(false, 'data migrations should not error when ' +
-                        'transient error injected');
-                });
-
-                next();
-        },
-        function checkDataMigrationsTransientError(ctx, next) {
-            var MAX_NUM_TRIES = 20;
-            var NUM_TRIES = 0;
-            var RETRY_DELAY_IN_MS = 1000;
-
-            assert.object(ctx.vmapiClient, 'ctx.vmapiClient');
-
-            function doCheckMigrationsStatus() {
-                var foundExpectedErrMsg;
-                var latestMigrationsErr;
-
-                ++NUM_TRIES;
-
-                latestMigrationsErr =
-                    ctx.dataMigrationsCtrl.getLatestErrors(TEST_MODEL_NAME);
-                if (latestMigrationsErr) {
-                    foundExpectedErrMsg =
-                        latestMigrationsErr.indexOf(TRANSIENT_ERROR_MSG) !== -1;
-                    t.ok(foundExpectedErrMsg,
-                            'data migrations latest error should include ' +
-                                TRANSIENT_ERROR_MSG + ', got: ' +
-                                latestMigrationsErr);
-                        next();
-                } else {
-                    if (NUM_TRIES >= MAX_NUM_TRIES) {
-                        t.ok(false, 'max number of tries exceeded');
-                        next();
-                    } else {
-                        setTimeout(doCheckMigrationsStatus,
-                            RETRY_DELAY_IN_MS);
-                    }
-                }
-            }
-
-            doCheckMigrationsStatus();
-        },
-        function removeTransientError(ctx, next) {
-            ctx.dataMigrationsCtrl.removeAllListeners('done');
-            ctx.dataMigrationsCtrl.removeAllListeners('error');
-
-            ctx.morayClient.batch = ctx.originalBatch;
-
-            ctx.dataMigrationsCtrl.once('done',
-                function onDataMigrationsDone() {
-                    t.ok(true,
-                        'data migration should eventually complete ' +
-                            'successfully');
+            morayBucketsInitializer.once('done',
+                function onBucketsInitDone() {
+                    t.ok(false, 'buckets init should not complete when ' +
+                        'non-transient error injected');
                     next();
                 });
 
-            ctx.dataMigrationsCtrl.once('error',
-                function onDataMigrationsError(dataMigrationErr) {
-                    t.ok(false, 'data migrations should not error, got: ' +
-                        util.inspect(dataMigrationErr));
-                    next(dataMigrationErr);
+            morayBucketsInitializer.once('error',
+                function onBucketsInitError(bucketsInitErr) {
+                    t.ok(true, 'Moray buckets init should error when ' +
+                        'non-transient error injected, got: ' +
+                        bucketsInitErr.toString());
+                    next();
                 });
-        },
-        function readTestObjects(ctx, next) {
-            assert.object(ctx.morayClient, 'ctx.morayClient');
-
-            findAllObjects(ctx.morayClient, TEST_BUCKET_NAME, '(foo=*)',
-                function onFindAllObjects(findErr, objects) {
-                    var nonMigratedObjects;
-
-                    t.ok(!findErr,
-                        'reading all objects back should not error, got: ' +
-                            util.inspect(findErr));
-                    t.ok(objects,
-                        'reading all objects should not return empty response');
-
-                    if (objects) {
-                        nonMigratedObjects =
-                            objects.filter(function checkObjects(object) {
-                                return object.value.bar !== 'foo';
-                            });
-                        t.equal(nonMigratedObjects.length, 0,
-                            'data migrations should have migrated all objects' +
-                                ', got the following non-migrated objects: ' +
-                                nonMigratedObjects.join(', '));
-                    }
-
-                    next(findErr);
-                });
-        },
-        function checkDataMigrationsDone(ctx, next) {
-            var latestExpectedCompletedVmsMigration = 1;
-            var latestCompletedMigrations =
-                ctx.dataMigrationsCtrl.getLatestCompletedMigrationForModel(
-                    TEST_MODEL_NAME);
-
-            t.equal(latestExpectedCompletedVmsMigration,
-                latestCompletedMigrations,
-                'latest completed data migration for vms model should be ' +
-                    'at version ' + latestExpectedCompletedVmsMigration);
-
-            next();
         }
     ]}, function allMigrationsDone(allMigrationsErr) {
         t.ok(!allMigrationsErr, 'data migrations test should not error');
@@ -320,136 +433,3 @@ test('data migrations with transient error', function (t) {
         t.end();
     });
 });
-
-/*
-exports.data_migrations_non_transient_error = function (t) {
-    var context = {};
-
-    vasync.pipeline({arg: context, funcs: [
-        function cleanup(ctx, next) {
-            testMoray.cleanupLeftoverBuckets([
-                VMS_BUCKET_NAME,
-                SERVER_VMS_BUCKET_NAME,
-                ROLE_TAGS_BUCKET_NAME
-            ],
-            function onCleanupLeftoverBuckets(cleanupErr) {
-                t.ok(!cleanupErr,
-                    'cleaning up leftover buckets should be successful');
-                next(cleanupErr);
-            });
-        },
-        function setupMorayBuckets(ctx, next) {
-            var morayBucketsInitializer;
-            var morayClient;
-            var moraySetup = morayInit.startMorayInit({
-                morayConfig: common.config.moray,
-                morayBucketsConfig: TEST_BUCKETS_CONFIG,
-                changefeedPublisher: changefeedUtils.createNoopCfPublisher()
-            });
-
-            ctx.moray = moraySetup.moray;
-            ctx.morayBucketsInitializer = morayBucketsInitializer =
-                moraySetup.morayBucketsInitializer;
-            ctx.morayClient = morayClient = moraySetup.morayClient;
-
-            function cleanUp() {
-                morayBucketsInitializer.removeAllListeners('error');
-                morayBucketsInitializer.removeAllListeners('done');
-            }
-
-            morayBucketsInitializer.on('done', function onMorayBucketsInit() {
-                t.ok(true,
-                    'original moray buckets setup should be ' +
-                        'successful');
-
-                cleanUp();
-                next();
-            });
-
-            morayBucketsInitializer.on('error',
-                function onMorayBucketsInitError(morayBucketsInitErr) {
-                    t.ok(!morayBucketsInitErr,
-                        'original moray buckets initialization should ' +
-                            'not error');
-
-                    cleanUp();
-                    next(morayBucketsInitErr);
-                });
-        },
-        function writeTestObjects(ctx, next) {
-            assert.object(ctx.morayClient, 'ctx.morayClient');
-
-            writeObjects(ctx.morayClient, VMS_BUCKET_NAME, {
-                foo: 'foo'
-            }, NUM_TEST_OBJECTS, function onTestObjectsWritten(writeErr) {
-                t.ok(!writeErr, 'writing test objects should not error, got: ' +
-                    util.inspect(writeErr));
-                next(writeErr);
-            });
-        },
-        function loadDataMigrations(ctx, next) {
-            var dataMigrationsLoaderLogger = bunyan.createLogger({
-                name: 'data-migrations-loader',
-                level: 'info'
-            });
-
-            dataMigrationsLoader.loadMigrations({
-                log: dataMigrationsLoaderLogger,
-                migrationsRootPath: path.resolve(__dirname, 'fixtures',
-                    'data-migrations-valid')
-            }, function onMigrationsLoaded(loadMigrationsErr, migrations) {
-                ctx.migrations = migrations;
-                next(loadMigrationsErr);
-            });
-        },
-        function injectNonTransientError(ctx, next) {
-            ctx.originalPutBatch = ctx.moray.putBatch;
-            ctx.moray.putBatch =
-                function mockedPutBatch(modelName, records, callback) {
-                    assert.string(modelName, 'modelName');
-                    assert.arrayOfObject(records, 'records');
-                    assert.func(callback, 'callback');
-
-                    callback(new VError({
-                        name: 'BucketNotFoundError'
-                    }, 'non-transient error'));
-                };
-            next();
-        },
-        function startMigrations(ctx, next) {
-            assert.object(ctx.migrations, 'ctx.migrations');
-            assert.object(ctx.moray, 'ctx.moray');
-
-            ctx.dataMigrationsCtrl = new DataMigrationsController({
-                log: bunyan.createLogger({
-                    name: 'data-migratons-controller',
-                    level: 'info'
-                }),
-                migrations: ctx.migrations,
-                moray: ctx.moray
-            });
-
-            ctx.dataMigrationsCtrl.start();
-
-            ctx.dataMigrationsCtrl.once('done',
-                function onDataMigrationsDone() {
-                    t.ok(false, 'data migration should not complete when ' +
-                        'non-transient error injected');
-                });
-
-            ctx.dataMigrationsCtrl.once('error',
-                function onDataMigrationsError(dataMigrationErr) {
-                    t.ok(true, 'data migrations should error when ' +
-                        'non-transient error injected, got: ' +
-                        dataMigrationErr.toString());
-                    next();
-                });
-        }
-    ]}, function allMigrationsDone(allMigrationsErr) {
-        t.equal(allMigrationsErr, undefined,
-                'data migrations test should not error');
-        context.morayClient.close();
-        t.done();
-    });
-};
-*/
