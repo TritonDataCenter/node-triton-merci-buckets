@@ -13,8 +13,6 @@ var assert = require('assert-plus');
 var DATA_VERSION = 1;
 
 function migrateRecord(record, options) {
-    var log;
-    var parsedInternalMetadata;
     var recordValue;
 
     assert.object(record, 'record');
@@ -22,7 +20,6 @@ function migrateRecord(record, options) {
     assert.object(options, 'options');
     assert.object(options.log, 'options.log');
 
-    log = options.log;
     recordValue = record.value;
 
     if (recordValue.data_version !== undefined) {

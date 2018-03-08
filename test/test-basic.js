@@ -1,9 +1,19 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+/*
+ * Copyright (c) 2018, Joyent, Inc.
+ */
+
 var bunyan = require('bunyan');
 var jsprim = require('jsprim');
 var libuuid = require('libuuid');
-var moray = require('moray');
 var morayBuckets = require('../index');
 var path = require('path');
+var testMoray = require('./lib/moray');
 var vasync = require('vasync');
 var verror = require('verror');
 
@@ -30,17 +40,6 @@ var bucketsConfig = {
     }
 };
 
-var morayConfig = {
-    connectTimeout: 200,
-    host: "10.99.99.17",
-    log: TEST_LOGGER,
-    port: 2020,
-    retry: {
-        retries: 2,
-        minTimeout: 500
-    }
-};
-
 var bucketsInitializer;
 var dataMigrations;
 var dataMigrationsDirPath = path.join(__dirname,
@@ -51,7 +50,10 @@ vasync.pipeline({funcs: [
     function connectToMoray(_, next) {
         console.log('connecting to moray...');
 
-        morayClient = moray.createClient(morayConfig);
+        morayClient = testMoray.creatTestMorayClient({
+            log: TEST_LOGGER
+        });
+
         morayClient.once('connect', next);
         morayClient.on('error', next);
     },
@@ -173,21 +175,3 @@ vasync.pipeline({funcs: [
         console.log('Moray buckets init started successfully');
     }
 });
-
-
-/*
- * This is just an example of how some of the APIs of the buckets initializer
- * class could be used to report on where the init process is from a /ping
- * endpoint.
- */
-function pingEndpoint(req, res, next) {
-    var bucketsInitializer = req.app.bucketsInitializer;
-
-
-    res.send(200, {
-        latestError: bucketsInitializer.getLatestError(),
-        bucketsSetupState: bucketsInitializer.getBucketsSetupState(),
-        bucketsReindexState: bucketsInitializer.getBucketsReindexState(),
-        dataMigrationsState: bucketsInitializer.getDataMigrationsState()
-    });
-}
