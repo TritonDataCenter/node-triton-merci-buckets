@@ -14,25 +14,37 @@ var moray = require('moray');
 var uuid = require('uuid');
 var vasync = require('vasync');
 
-var DEFAULT_MORAY_IP = '10.99.99.17';
+/*
+ * This value is the result of running "vmadm get $(vmadm lookup -1
+ * alias=binder0) | json nics.0.ip" in my COAL's GZ. It can be overriden by
+ * setting the BINDER_IP environment variable.
+ */
+var DEFAULT_BINDER_IP = '10.99.99.11';
 
 function creatTestMorayClient(options) {
     assert.object(options, 'options');
     assert.object(options.log, 'options.log');
 
+    /*
+     * We want to use a configuration that makes the Moray client use SRV
+     * records so that cueball can perform te load balancing of requests itself
+     * instead of relying on HAProxy to do that. Relying on HAProxy means that
+     * it is very likely that most requests to Moray will hit the same Moray
+     * instance, and that we won't exercise behaviors that are only triggered
+     * when hitting all Moray instances evenly (e.g. stale buckets cache).
+     */
     var morayConfig = {
-        connectTimeout: 200,
-        host: DEFAULT_MORAY_IP,
+        cueballOptions: {
+            resolvers: [DEFAULT_BINDER_IP]
+        },
         log: options.log,
-        port: 2020,
-        retry: {
-            retries: 2,
-            minTimeout: 500
-        }
+        srvDomain: 'moray.coal.joyent.us'
     };
 
-    if (process.env.MORAY_IP !== undefined) {
-        morayConfig.host = process.env.MORAY_IP;
+    if (process.env.BINDER_IP !== undefined) {
+        morayConfig.cueballOptions = {
+            resolvers: [process.env.BINDER_IP]
+        };
     }
 
     return moray.createClient(morayConfig);

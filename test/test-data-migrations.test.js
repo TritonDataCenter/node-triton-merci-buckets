@@ -21,19 +21,40 @@ var MorayBucketsInitializer = require('../index').MorayBucketsInitializer;
 var testMoray = require('./lib/moray');
 
 var TEST_BUCKET_NAME = 'moray_buckets_test_data_migrations';
-var TEST_BUCKETS_CONFIG = {};
+var TEST_BUCKETS_CONFIG_NO_DATA_MIGRATIONS = {};
+var TEST_BUCKETS_CONFIG_WITH_DATA_MIGRATIONS = {};
 var TEST_LOGGER = bunyan.createLogger({
     name: 'test-data-migrations'
 });
 var TEST_MODEL_NAME = 'test_model';
 
-TEST_BUCKETS_CONFIG[TEST_MODEL_NAME] = {
+/*
+ * We use two versions for the VMS_BUCKET_CONFIG (VMS_BUCKET_CONFIG_V1 and
+ * VMS_BUCKET_CONFIG_V2) to exercise the code path where finding objects to
+ * migrate fails with an InvalidQueryError due to the fact that some Moray
+ * instances do not have the data_version field indexed in their bucket cache.
+ * See https://smartos.org/bugview/TRITON-214 for context.
+ */
+TEST_BUCKETS_CONFIG_NO_DATA_MIGRATIONS[TEST_MODEL_NAME] = {
+    name: TEST_BUCKET_NAME,
+    schema: {
+        index: {
+            foo: { type: 'string' },
+            bar: { type: 'string' }
+        }
+    }
+};
+
+TEST_BUCKETS_CONFIG_WITH_DATA_MIGRATIONS[TEST_MODEL_NAME] = {
     name: TEST_BUCKET_NAME,
     schema: {
         index: {
             foo: { type: 'string' },
             bar: { type: 'string' },
             data_version: { type: 'number' }
+        },
+        options: {
+            version: 1
         }
     }
 };
@@ -84,7 +105,7 @@ test('data migrations with invalid filenames', function (t) {
     });
 
     morayBucketsInitializer  = new MorayBucketsInitializer({
-        bucketsConfig: TEST_BUCKETS_CONFIG,
+        bucketsConfig: TEST_BUCKETS_CONFIG_WITH_DATA_MIGRATIONS,
         dataMigrationsPath: path.resolve(__dirname, 'fixtures',
             'test-data-migrations', 'data-migrations-invalid-filenames'),
         log: TEST_LOGGER,
@@ -145,15 +166,23 @@ test('data migrations with transient error', function (t) {
         },
         function setupMorayBuckets(ctx, next) {
             morayBucketsInitializer = new MorayBucketsInitializer({
-                bucketsConfig: TEST_BUCKETS_CONFIG,
+                bucketsConfig: TEST_BUCKETS_CONFIG_NO_DATA_MIGRATIONS,
                 log: TEST_LOGGER,
                 morayClient: ctx.morayClient
             });
 
             morayBucketsInitializer.start();
 
-            morayBucketsInitializer.once('done', next);
-            morayBucketsInitializer.once('error', next);
+            morayBucketsInitializer.once('done', function bucketsInitDone() {
+                t.pass('buckets init should succeed');
+                next();
+            });
+
+            morayBucketsInitializer.once('error',
+                function bucketsInitError(bucketsInitErr) {
+                    t.ifError(bucketsInitErr, 'buckets init should not error');
+                    next(bucketsInitErr);
+                });
         },
         function checkMorayBucketsInitStatus(_, next) {
             var bucketsReindexStatus =
@@ -190,6 +219,27 @@ test('data migrations with transient error', function (t) {
                 next(writeErr);
             });
         },
+        function migrateSchemaForDataMigrations(ctx, next) {
+            morayBucketsInitializer = new MorayBucketsInitializer({
+                bucketsConfig: TEST_BUCKETS_CONFIG_WITH_DATA_MIGRATIONS,
+                log: TEST_LOGGER,
+                morayClient: ctx.morayClient
+            });
+
+            morayBucketsInitializer.start();
+
+            morayBucketsInitializer.once('done', function bucketsInitDone() {
+                t.pass('buckets init after schema upgrade should succeed');
+                next();
+            });
+
+            morayBucketsInitializer.once('error',
+                function bucketsInitError(bucketsInitErr) {
+                    t.ifError(bucketsInitErr,
+                        'buckets init after schema upgrade should not error');
+                    next(bucketsInitErr);
+                });
+        },
         function injectTransientError(ctx, next) {
             ctx.originalBatch = ctx.morayClient.batch;
             ctx.morayClient.batch =
@@ -203,7 +253,7 @@ test('data migrations with transient error', function (t) {
         },
         function startMigrations(ctx, next) {
             morayBucketsInitializer = new MorayBucketsInitializer({
-                bucketsConfig: TEST_BUCKETS_CONFIG,
+                bucketsConfig: TEST_BUCKETS_CONFIG_WITH_DATA_MIGRATIONS,
                 log: TEST_LOGGER,
                 morayClient: ctx.morayClient,
                 dataMigrationsPath: path.join(__dirname, 'fixtures',
@@ -226,20 +276,44 @@ test('data migrations with transient error', function (t) {
             next();
         },
         function checkDataMigrationsTransientError(_, next) {
-            var MAX_NUM_TRIES = 20;
+            var MAX_NUM_TRIES;
+            /*
+             * We wait for the moray bucket cache to be refreshed on all Moray
+             * instances, which can be up to 5 minutes currently, and then some.
+             * This is the maximum delay during which InvalidQueryError can
+             * occur due to stale buckets cache, after which only the transient
+             * error injected by this test should surface.
+             */
+            var MAX_TRIES_DURATION_IN_MS = 6 * 60 * 1000;
             var NUM_TRIES = 0;
-            var RETRY_DELAY_IN_MS = 1000;
+            var RETRY_DELAY_IN_MS = 10000;
+
+            MAX_NUM_TRIES = MAX_TRIES_DURATION_IN_MS / RETRY_DELAY_IN_MS;
 
             function doCheckMigrationsStatus() {
-                var latestMigrationsErrs =
-                    morayBucketsInitializer.status().dataMigrations.latestErrors;
+                var bucketsInitStatus;
+                var dataMigrationsStatus;
+                var errMsg;
                 var foundExpectedErrMsg;
+                var latestMigrationsErrs;
 
                 ++NUM_TRIES;
 
-                if (latestMigrationsErrs) {
+                bucketsInitStatus = morayBucketsInitializer.status();
+                t.ok(bucketsInitStatus, 'buckets init status must be present');
+
+                if (bucketsInitStatus) {
+                    t.ok(bucketsInitStatus.dataMigrations,
+                        'data migrations status must be present');
+                    dataMigrationsStatus = bucketsInitStatus.dataMigrations;
+                    latestMigrationsErrs = dataMigrationsStatus.latestErrors;
+                }
+
+                if (latestMigrationsErrs &&
+                    latestMigrationsErrs[TEST_MODEL_NAME]) {
+                    errMsg = latestMigrationsErrs[TEST_MODEL_NAME].message;
                     foundExpectedErrMsg =
-                        latestMigrationsErrs[TEST_MODEL_NAME].message.indexOf(TRANSIENT_ERROR_MSG) !== -1;
+                        errMsg.indexOf(TRANSIENT_ERROR_MSG) !== -1;
 
                     t.ok(foundExpectedErrMsg,
                             'data migrations latest error should include ' +
@@ -363,7 +437,7 @@ test('data migrations with non-transient error', function (t) {
         },
         function setupMorayBuckets(ctx, next) {
             morayBucketsInitializer = new MorayBucketsInitializer({
-                bucketsConfig: TEST_BUCKETS_CONFIG,
+                bucketsConfig: TEST_BUCKETS_CONFIG_WITH_DATA_MIGRATIONS,
                 log: TEST_LOGGER,
                 morayClient: ctx.morayClient
             });
@@ -399,7 +473,7 @@ test('data migrations with non-transient error', function (t) {
         },
         function startMigrations(ctx, next) {
             morayBucketsInitializer = new MorayBucketsInitializer({
-                bucketsConfig: TEST_BUCKETS_CONFIG,
+                bucketsConfig: TEST_BUCKETS_CONFIG_WITH_DATA_MIGRATIONS,
                 log: TEST_LOGGER,
                 morayClient: ctx.morayClient,
                 dataMigrationsPath: path.join(__dirname, 'fixtures',

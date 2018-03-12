@@ -167,22 +167,26 @@ function testMigrationToBucketsConfig(bucketsConfig, options, t, callback) {
                                 'getting all rows versions should not error');
                             t.ok(allRecords,
                                 'list of records should be present');
-                            if (allRecords) {
-                                t.strictEqual(allRecords.length, NB_TEST_OBJECTS,
-                                    NB_TEST_OBJECTS + ' records must have been ' +
-                                        'checked');
 
-                                allRecordsAtExpectedVersion =
-                                    allRecords.every(function checkVersion(record) {
-                                        assert.object(record, 'record');
-
-                                        return record._rver === expectedVersion;
-                                    });
-
-                                t.ok(allRecordsAtExpectedVersion,
-                                    'all records should be at version ' +
-                                        expectedVersion.version);
+                            if (!allRecords) {
+                                done();
+                                return;
                             }
+
+                            t.strictEqual(allRecords.length, NB_TEST_OBJECTS,
+                                NB_TEST_OBJECTS + ' records must have ' +
+                                    'been checked');
+
+                            allRecordsAtExpectedVersion =
+                                allRecords.every(function checkVersion(record) {
+                                    assert.object(record, 'record');
+
+                                    return record._rver === expectedVersion;
+                                });
+
+                            t.ok(allRecordsAtExpectedVersion,
+                                'all records should be at version ' +
+                                    expectedVersion.version);
 
                             done();
                         });
@@ -223,7 +227,12 @@ function testMigrationToBucketsConfig(bucketsConfig, options, t, callback) {
             var expectedBucketsInitStatus = {
                 bucketsSetup: {state: 'DONE'},
                 bucketsReindex: {state: 'DONE'},
-                dataMigrations: {}
+                /*
+                 * No data migrations path was passed to the
+                 * MorayBucketsInitializer constructor above, so no data
+                 * migration will be started.
+                 */
+                dataMigrations: {state: 'NOT_STARTED'}
             };
 
             t.deepEqual(bucketsInitStatus, expectedBucketsInitStatus);

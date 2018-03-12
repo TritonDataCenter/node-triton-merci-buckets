@@ -21,12 +21,12 @@ var TEST_LOGGER = bunyan.createLogger({
     name: 'test-schema-migrations'
 });
 
-test('Moray schema migrations with transient error', function (t) {
+test('Moray buckets setup with transient error', function (t) {
     var morayBucketsInitializer;
     var morayClient;
     var origMorayClientGetBucket;
     var TEST_BUCKET_NAME =
-        'moray_buckets_test_schema_migrations_transient_error';
+        'moray_buckets_test_buckets_setup_transient_error';
     var TRANSIENT_ERROR_MSG = 'Mocked transient error';
 
     var TEST_BUCKET_CONFIG_V0 = {
@@ -180,11 +180,11 @@ test('Moray schema migrations with transient error', function (t) {
 });
 
 
-test('Moray schema migrations with non-transient error', function (t) {
+test('Moray buckets setup with non-transient error', function (t) {
     var morayBucketsInitializer;
     var morayClient;
     var TEST_BUCKET_NAME =
-        'moray_buckets_test_schema_migrations_non_transient_error';
+        'moray_buckets_test_buckets_setup_non_transient_error';
 
     var TEST_BUCKET_CONFIG_V0 = {
         name: TEST_BUCKET_NAME,
