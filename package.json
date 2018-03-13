@@ -1,15 +1,16 @@
 {
-  "name": "moray-buckets",
+  "name": "triton-merci-buckets",
   "version": "1.0.0",
-  "description": "Library to perform common moray buckets initialization and migration operations using best practices.",
+  "description": "Library to perform common Moray buckets initialization and migration operations using best practices.",
   "main": "index.js",
   "scripts": {
     "test": "make test"
   },
   "keywords": [
-    "moray"
+    "moray",
+    "triton"
   ],
-  "author": "Julien Gilli",
+  "author": "Joyent (joyent.com)",
   "license": "MPL-2.0",
   "dependencies": {
     "assert-plus": "1.0.0",
