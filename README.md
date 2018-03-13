@@ -32,9 +32,33 @@ time by the Triton team.
 
 ### Important design and implementation choices
 
-#### Buckets creation/updates, reindexing and data migrations handled as a unit
+#### Buckets creation/update, reindexing and data migrations handled as a unit
 
-#### field used to store "data version" not configurable
+Currently, there is no way to perform buckets creation/update, objects
+reindexing or data migrations in an arbitrary order when using this module. This
+is by design.
+
+Controlling the order of those operations allows the implementation of this
+module to determine when some errors are transient or not. For instance, the
+data migrations step relies on the fact that all records are reindexed before it
+starts, so that it can treat any `InvalidQueryError` when using the
+`data_version` indexed field as a transient error.
+
+#### Field used to store "data version" not configurable
+
+Currently, data migrations require the presence of a `data_version` indexed
+field. If that field is not present, the buckets initialization process will
+`assert` and make the process exit.
+
+Ideally, consumers of this API would be able to pass the name of the field to
+use for storing the "data version" of records for each bucket.
+
+#### Data migration of each record is performed synchronously
+
+This is also by design. The first consumer of this module,
+[sdc-vmapi](https://github.com/joyent/sdc-vmapi), did not require performing I/O
+operations when migrating records, and thus the decision was to keep the
+implementation as simple as possible.
 
 ## Usage
 
@@ -237,7 +261,13 @@ Each `state` value in the status object above can have the following values:
 
 ### Events
 
-#### 'error'
+#### `done`
+
+Emitted when all required steps to initialize buckets and migrate data have
+completed successfully. See below for more granular events
+(`buckets-setup-done`, `buckets-reindex-done` and `data-migrations-done`).
+
+#### `error`
 
 Emitted when a non-transient error was encountered. A non-transient error can be
 the result of:
@@ -247,7 +277,7 @@ the result of:
 * the maximum number of retries being reached by any of the buckets
   initialization step described above
 
-#### 'buckets-setup-done'
+#### `buckets-setup-done`
 
 Emitted when the first step of the buckets initialization process
 (creating/updating all buckets) has completed successfully. At this point
@@ -258,7 +288,7 @@ read/write operations on all buckets should succeed, but:
 
 * data migrations haven't run, so some objects may be outdated
 
-#### 'buckets-reindex-done'
+#### `buckets-reindex-done`
 
 Emitted when all objects have been reindexed. Due to the way Moray caches
 buckets schemas, it is still not necessarily safe to perform `findObjects`
@@ -266,7 +296,7 @@ requests without using the `requireIndexes` options, as they may return
 erroneous results until all bucket caches are refreshed across all Moray
 instances.
 
-#### 'data-migrations-done'
+#### `data-migrations-done`
 
 Emitted when all data migrations have completed successfully.
 
@@ -293,6 +323,10 @@ Data versions for all records start at `1`, and object that do not have a
 `data_version` field are considered to not have any version.
 
 ### Structure on disk
+
+See [the data migrations files in
+sdc-vmapi](https://github.com/joyent/sdc-vmapi/tree/131eada3251fb7e558e9e84cd89a9b6c63e5f4c5/lib/data-migrations/migrations)
+for an example.
 
 ### Example data migration
 
