@@ -36,7 +36,7 @@ test:
 	$(NODE) $(TAPE) test/*.test.js
 
 .PHONY: cutarelease
-cutarelease: versioncheck
+cutarelease:
 	[[ -z `git status --short` ]]  # If this fails, the working dir is dirty.
 	@which json 2>/dev/null 1>/dev/null && \
 	    ver=$(shell json -f package.json version) && \
