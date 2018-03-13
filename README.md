@@ -5,7 +5,7 @@
 -->
 
 <!--
-    Copyright (c) 2016, Joyent, Inc.
+    Copyright (c) 2018, Joyent, Inc.
 -->
 
 This repository is part of the Joyent Triton project. See the [contribution
