@@ -1,6 +1,6 @@
 {
   "name": "triton-merci-buckets",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Library to perform common Moray buckets initialization and migration operations using best practices.",
   "main": "index.js",
   "scripts": {
